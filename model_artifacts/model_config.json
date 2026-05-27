@@ -1,0 +1,23 @@
+{
+  "ae_weight": 0.6,
+  "if_weight": 0.4,
+  "fraud_threshold": 0.5,
+  "input_dim": 15,
+  "feature_cols": [
+    "amount",
+    "oldbalanceOrg",
+    "newbalanceOrig",
+    "oldbalanceDest",
+    "newbalanceDest",
+    "type_CASH_IN",
+    "type_CASH_OUT",
+    "type_DEBIT",
+    "type_PAYMENT",
+    "type_TRANSFER",
+    "balance_diff_orig",
+    "balance_diff_dest",
+    "amount_log",
+    "zero_balance_orig",
+    "zero_balance_dest"
+  ]
+}

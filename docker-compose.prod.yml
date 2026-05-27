@@ -1,0 +1,152 @@
+version: "3.9"
+
+services:
+  # ── Zookeeper ──────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: fraud_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks: [fraud_net]
+
+  # ── Kafka ──────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: fraud_kafka
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks: [fraud_net]
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud_postgres
+    environment:
+      POSTGRES_USER: fraud_user
+      POSTGRES_PASSWORD: fraud_pass
+      POSTGRES_DB: fraud_db
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    networks: [fraud_net]
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: fraud_redis
+    ports: ["6379:6379"]
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+    networks: [fraud_net]
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
+  api:
+    build: .
+    container_name: fraud_api
+    ports: ["8000:8000"]
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-meta-llama/llama-4-scout-17b-16e-instruct}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: fraud_user
+      POSTGRES_PASSWORD: fraud_pass
+      POSTGRES_DB: fraud_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      FRAUD_SCORE_THRESHOLD: 0.5
+      HIGH_RISK_THRESHOLD: 0.7
+      RETRAINING_FEEDBACK_THRESHOLD: 100
+    depends_on: [postgres, redis, kafka]
+    volumes:
+      - model_artifacts:/app/model_artifacts
+      - ./data:/app/data
+    networks: [fraud_net]
+    restart: unless-stopped
+
+  # ── Kafka Consumer ─────────────────────────────────────────────────────────
+  consumer:
+    build: .
+    container_name: fraud_consumer
+    command: python -m pipeline.consumer
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-meta-llama/llama-4-scout-17b-16e-instruct}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: fraud_user
+      POSTGRES_PASSWORD: fraud_pass
+      POSTGRES_DB: fraud_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      FRAUD_SCORE_THRESHOLD: 0.5
+    depends_on: [api, kafka, postgres, redis]
+    volumes:
+      - model_artifacts:/app/model_artifacts
+    networks: [fraud_net]
+    restart: unless-stopped
+
+  # ── Dashboard (Nginx) ──────────────────────────────────────────────────────
+  dashboard:
+    image: nginx:alpine
+    container_name: fraud_dashboard
+    ports: ["3000:80"]
+    volumes:
+      - ./dashboard/index.html:/usr/share/nginx/html/index.html:ro
+      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [api]
+    networks: [fraud_net]
+    restart: unless-stopped
+
+  # ── MLflow ─────────────────────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.11.1
+    container_name: fraud_mlflow
+    ports: ["5000:5000"]
+    volumes: [mlflow_artifacts:/mlflow/artifacts]
+    command: >
+      mlflow server
+      --backend-store-uri /mlflow/artifacts
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    networks: [fraud_net]
+
+  # ── Grafana (monitoring) ───────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fraud_grafana
+    ports: ["3001:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: fraudadmin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./dashboard/grafana/provisioning:/etc/grafana/provisioning
+    depends_on: [postgres]
+    networks: [fraud_net]
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_artifacts:
+  model_artifacts:
+  grafana_data:
+
+networks:
+  fraud_net:
+    driver: bridge
